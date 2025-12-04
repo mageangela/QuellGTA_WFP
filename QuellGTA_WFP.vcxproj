@@ -135,10 +135,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="QuellGTA_WFP.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="QuellGTA_WFP.cc" />
+    <ClCompile Include="QuellGTA_WFP.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

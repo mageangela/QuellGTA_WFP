@@ -15,12 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="QuellGTA_WFP.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="QuellGTA_WFP.cc">
+    <ClCompile Include="QuellGTA_WFP.c">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="QuellGTA_WFP.vcxproj" />
+  <Project Path="QuellGTA_WFP.vcxproj" Id="0b774d95-3039-4bc7-b346-3aaaa8d612d0" />
 </Solution>
