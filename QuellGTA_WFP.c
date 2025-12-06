@@ -194,34 +194,36 @@ BOOL ParseArguments(int argc, char* argv[], OperationMode* mode,
       }
     } else if (strcmp(argv[i], "-ip") == 0 || strcmp(argv[i], "--remote-ip") == 0) {
         if (i + 1 < argc) {
-            // 解析IPv4地址（如"192.168.1.100"）
+            // 解析IPv4地址
             struct in_addr addr;
             if (InetPtonA(AF_INET, argv[i + 1], &addr) == 1) {
-                params->remote_ip = addr.S_un.S_addr; // 转为网络字节序
+                // 关键：这里存储的是网络字节序
+                params->remote_ip = addr.S_un.S_addr; // 网络字节序
                 params->has_ip = TRUE;
+
+                // 【添加调试】打印原始值
+                printf("[解析] IP原始值: %s -> 0x%08X\n",
+                    argv[i + 1], params->remote_ip);
             }
             i++;
         }
-        else {
-            return FALSE;
-        }
-    } else if (strcmp(argv[i], "-port") == 0 || strcmp(argv[i], "--remote-port") == 0) {
+    } else if (strcmp(argv[i], "-rp") == 0 || strcmp(argv[i], "--remote-port") == 0) {
         if (i + 1 < argc) {
             int port = atoi(argv[i + 1]);
             if (port > 0 && port <= 65535) {
-                params->remote_port = htons((UINT16)port); // 转为网络字节序
+                // 改为主机字节序（WFP期望主机字节序）
+                params->remote_port = (UINT16)port;  // 去掉 htons()
                 params->has_remote_port = TRUE;
             }
             i++;
         }
-        else {
-            return FALSE;
-        }
-    } else if (strcmp(argv[i], "-lp") == 0 || strcmp(argv[i], "--local-port") == 0) {    // 解析本地端口参数
+    }
+    // 同理修改本地端口
+    else if (strcmp(argv[i], "-lp") == 0 || strcmp(argv[i], "--local-port") == 0) {
         if (i + 1 < argc) {
             int port = atoi(argv[i + 1]);
             if (port > 0 && port <= 65535) {
-                params->local_port = htons((UINT16)port);
+                params->local_port = (UINT16)port;  // 去掉 htons()
                 params->has_local_port = TRUE;
             }
             i++;
@@ -545,109 +547,158 @@ BOOL CreateGlobalBlockRule(HANDLE engine_handle) {
 }
 
 BOOL CreateConditionalRule(HANDLE engine_handle, const ConditionParams* params) {
+    printf("[调试] 输入参数：进程=%s, IP=%s, 远程端口=%u (原始值), 本地端口=%u, 协议指定=%d (值:%u)\n",
+        params->has_process ? params->process_path : "(无)",
+        params->has_ip ? "(已设置)" : "(无)",
+        params->has_remote_port ? ntohs(params->remote_port) : 0,
+        params->has_local_port ? ntohs(params->local_port) : 0,
+        params->has_protocol, params->ip_protocol);
+
     FWPM_FILTER0 filter = { 0 };
-    FWPM_FILTER_CONDITION conditions[4]; // 增加一个可能的协议条件
     UINT32 condition_count = 0;
     DWORD status = ERROR_SUCCESS;
-
-    // 新增：一个指针，专门用于存放需要释放的AppID Blob
     FWP_BYTE_BLOB* app_blob_to_free = NULL;
 
-    // ========== 条件：进程 (如果指定) ==========
+    // ===== 动态构建条件（关键修改：使用独立静态变量）=====
+    FWPM_FILTER_CONDITION condition_process = { 0 };
+    FWPM_FILTER_CONDITION condition_ip = { 0 };
+    FWPM_FILTER_CONDITION condition_remote_port = { 0 };
+    FWPM_FILTER_CONDITION condition_local_port = { 0 };
+    FWPM_FILTER_CONDITION condition_protocol = { 0 };
+
+    FWPM_FILTER_CONDITION* all_conditions[5] = { 0 };
+
+    // 条件1：进程
     if (params->has_process) {
         WCHAR wide_path[MAX_PATH_LENGTH];
         if (MultiByteToWideChar(CP_UTF8, 0, params->process_path, -1, wide_path, MAX_PATH_LENGTH) == 0) {
             return FALSE;
         }
 
-        // 【关键修改】将获取的blob保存到专用变量
         status = FwpmGetAppIdFromFileName0(wide_path, &app_blob_to_free);
         if (status != ERROR_SUCCESS || app_blob_to_free == NULL) {
             return FALSE;
         }
 
-        conditions[condition_count].fieldKey = FWPM_CONDITION_ALE_APP_ID;
-        conditions[condition_count].matchType = FWP_MATCH_EQUAL;
-        conditions[condition_count].conditionValue.type = FWP_BYTE_BLOB_TYPE;
-        conditions[condition_count].conditionValue.byteBlob = app_blob_to_free;
+        condition_process.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+        condition_process.matchType = FWP_MATCH_EQUAL;
+        condition_process.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+        condition_process.conditionValue.byteBlob = app_blob_to_free;
+
+        all_conditions[condition_count] = &condition_process;
         condition_count++;
     }
 
-    // ========== 条件：IP地址 (如果指定) ==========
+    // 条件2：IP地址
     if (params->has_ip) {
-        FWP_V4_ADDR_AND_MASK ip_condition;
-        ip_condition.addr = params->remote_ip;
-        ip_condition.mask = 0xFFFFFFFF;
 
-        conditions[condition_count].fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
-        conditions[condition_count].matchType = FWP_MATCH_EQUAL;
-        conditions[condition_count].conditionValue.type = FWP_V4_ADDR_MASK;
-        conditions[condition_count].conditionValue.v4AddrMask = &ip_condition;
+        UINT32 ip_host_order = ntohl(params->remote_ip);
+
+        condition_ip.fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
+        condition_ip.matchType = FWP_MATCH_EQUAL;
+        condition_ip.conditionValue.type = FWP_UINT32;
+
+        condition_ip.conditionValue.uint32 = ip_host_order;
+
+        printf("[调试] IP地址: 原始=0x%08X, 主机序=0x%08X\n",
+            params->remote_ip, ip_host_order);
+
+        all_conditions[condition_count] = &condition_ip;
         condition_count++;
     }
 
-    // ========== 条件3：端口 (如果指定) ==========
+    // 条件3：远程端口
     if (params->has_remote_port) {
-        conditions[condition_count].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
-        conditions[condition_count].matchType = FWP_MATCH_EQUAL;
-        conditions[condition_count].conditionValue.type = FWP_UINT16;
-        conditions[condition_count].conditionValue.uint16 = params->remote_port; // 网络字节序
+        condition_remote_port.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+        condition_remote_port.matchType = FWP_MATCH_EQUAL;
+        condition_remote_port.conditionValue.type = FWP_UINT16;
+        condition_remote_port.conditionValue.uint16 = params->remote_port;
+
+        all_conditions[condition_count] = &condition_remote_port;
         condition_count++;
     }
 
-    // ========== 条件：本地端口 (如果指定) ==========
+    // 条件4：本地端口
     if (params->has_local_port) {
-        conditions[condition_count].fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
-        conditions[condition_count].matchType = FWP_MATCH_EQUAL;
-        conditions[condition_count].conditionValue.type = FWP_UINT16;
-        conditions[condition_count].conditionValue.uint16 = params->local_port;
+        condition_local_port.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+        condition_local_port.matchType = FWP_MATCH_EQUAL;
+        condition_local_port.conditionValue.type = FWP_UINT16;
+        condition_local_port.conditionValue.uint16 = params->local_port;
+
+        all_conditions[condition_count] = &condition_local_port;
         condition_count++;
     }
 
-    // ========== 条件：协议类型 (如果指定) ==========
+    // 条件5：协议
     if (params->has_protocol) {
-        conditions[condition_count].fieldKey = FWPM_CONDITION_IP_PROTOCOL;
-        conditions[condition_count].matchType = FWP_MATCH_EQUAL;
-        conditions[condition_count].conditionValue.type = FWP_UINT8;
-        conditions[condition_count].conditionValue.uint8 = params->ip_protocol;
+        condition_protocol.fieldKey = FWPM_CONDITION_IP_PROTOCOL;
+        condition_protocol.matchType = FWP_MATCH_EQUAL;
+        condition_protocol.conditionValue.type = FWP_UINT8;
+        condition_protocol.conditionValue.uint8 = params->ip_protocol;
+
+        all_conditions[condition_count] = &condition_protocol;
         condition_count++;
     }
 
-    // ========== 特殊情况处理 ==========
-    // 如果没有任何条件，则创建全局规则
+    // 无任何条件则创建全局规则
     if (condition_count == 0) {
         printf("[信息] 未指定具体条件，创建全局阻断规则。\n");
         return CreateGlobalBlockRule(engine_handle);
     }
 
-    // ========== 配置过滤器 ==========
+    // ===== 配置过滤器（采用测试成功的配置）=====
+    UuidCreate(&filter.filterKey);
     filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
-
-    (void)UuidCreate(&filter.filterKey);
-
     filter.displayData.name = L"QuellGTA Block";
     filter.displayData.description = L"WFP Block outbound IPv4 connections";
-
     filter.subLayerKey = kFirewallSublayerGuid;
-    filter.weight.type = FWP_UINT8;
-    filter.weight.uint8 = 0xF;
 
+    // 关键修改1：使用最高权重
+    filter.weight.type = FWP_EMPTY;
+    //filter.weight.uint8 = 0xF;
+
+    // 关键修改2：直接使用条件数组
     filter.numFilterConditions = condition_count;
-    filter.filterCondition = conditions;
+    // 需要将指针数组转换为FWPM_FILTER_CONDITION*数组
+    // 这里我们使用一个临时数组来存储
+    FWPM_FILTER_CONDITION final_conditions[5];
+    for (UINT32 i = 0; i < condition_count; i++) {
+        final_conditions[i] = *all_conditions[i];
+    }
+    filter.filterCondition = final_conditions;
+
+    // 关键修改3：简化标志位
+    filter.flags = FWPM_FILTER_FLAG_INDEXED;  // 只使用INDEXED
 
     filter.action.type = FWP_ACTION_BLOCK;
     filter.providerKey = (GUID*)&kFirewallProviderGuid;
-    filter.flags = FWPM_FILTER_FLAG_INDEXED | FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT;
 
-    // ========== 添加过滤器 ==========
+    // ===== 添加过滤器 =====
     UINT64 filter_id = 0;
     status = FwpmFilterAdd0(engine_handle, &filter, NULL, &filter_id);
 
-    // ========== 【关键修改】清理资源 ==========
-    // 无论条件顺序如何，只需检查我们是否申请了app_blob
+    // 资源清理
     if (app_blob_to_free != NULL) {
         FwpmFreeMemory0((void**)&app_blob_to_free);
     }
 
-    return (status == ERROR_SUCCESS);
+    if (status != ERROR_SUCCESS) {
+        printf("[错误] 添加过滤器失败！状态码: 0x%08X\n", status);
+
+        // 获取详细错误信息
+        LPSTR msg_buf = NULL;
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_IGNORE_INSERTS, NULL, status,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPSTR)&msg_buf, 0, NULL);
+        if (msg_buf) {
+            printf("       错误描述: %s", msg_buf);
+            LocalFree(msg_buf);
+        }
+
+        return FALSE;
+    }
+
+    printf("[成功] 过滤器创建成功！过滤器ID: %llu\n", filter_id);
+    return TRUE;
 }
